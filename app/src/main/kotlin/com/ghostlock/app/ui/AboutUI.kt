@@ -153,6 +153,16 @@ internal fun AboutScreen(onBack: () -> Unit) {
                     onClick = { uriHandler.openUri("https://github.com/YuKongA/ghostlock-app") },
                 )
             }
+            /* 衍生版信息：修改者与衍生仓库（原项目版权信息不变） */
+            item(key = "derived") {
+                AboutLink(
+                    title = stringResource(R.string.about_derived),
+                    summary = stringResource(R.string.about_derived_summary),
+                    onClick = {
+                        uriHandler.openUri("https://github.com/linux-tools/Ghostlock-app-for-IQOO_Neo9")
+                    },
+                )
+            }
             item(key = "origins-title") {
                 SmallTitle(text = stringResource(R.string.about_origins))
             }
@@ -208,6 +218,18 @@ internal fun AboutScreen(onBack: () -> Unit) {
                         .padding(horizontal = 28.dp, vertical = 16.dp),
                     textAlign = TextAlign.Center,
                     fontSize = 13.sp,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
+            item(key = "modifier") {
+                Text(
+                    text = stringResource(R.string.about_modifier_note),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 28.dp)
+                        .padding(bottom = 8.dp),
+                    textAlign = TextAlign.Center,
+                    fontSize = 12.sp,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )
             }

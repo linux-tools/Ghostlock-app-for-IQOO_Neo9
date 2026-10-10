@@ -9,6 +9,18 @@
         <package android:name="me.weishu.kernelsu" />
         <package android:name="com.resukisu.resukisu" />
         <package android:name="com.kowx712.supermanager" />
+        <package android:name="com.rifsxd.ksunext" />
+        <!-- SukiSU Ultra: 实际包名 com.sukisu.ultra（旧版 com.suki.sukisu 一并保留） -->
+        <package android:name="com.sukisu.ultra" />
+        <package android:name="com.suki.sukisu" />
+        <!-- 7kimisu: applicationId com.sevenk.core（PR 构建 com.sevenk.core.pr） -->
+        <package android:name="com.sevenk.core" />
+        <package android:name="com.sevenk.core.pr" />
+        <!-- 未收录的管理器用"自定义包名"，靠 launcher intent 可见性兜底 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
     <application
         android:name=".GhostlockApplication"

@@ -16,7 +16,7 @@ Rows explicitly marked **Shizuku required** run through a shell UserService. Sta
 
 ## Quick Start
 
-Open **GhostLock** and tap **Run**. KernelSU (`me.weishu.kernelsu`), ReSukiSU (`com.resukisu.resukisu`), or KowSU (`com.kowx712.supermanager`) provides `ksud` for module loading; without it, W1/W2 still grant uid 0 but no module is loaded.
+Open **GhostLock** and tap **Run**. The app ships no KernelSU manager: pick your installed manager in the home-screen **KSU manager** card (KernelSU, KernelSU-Next, SukiSU Ultra, ReSukiSU, KowSU, 7kimisu, or a custom package). Activation loads `vrpatch.ko` first and then runs that manager's `ksud late-load --allow-shell --package-name <pkg> --kmi <kmi>`; without a usable `ksud`, W1/W2 still grant uid 0 but no module is loaded. Turn on **Temporary root only** to stop after `vrpatch.ko` and keep the debug root terminal.
 
 The execution chain is a pipeline of three components: a frontend (`root_child` startup/handoff), a backend (the CVE-2026-43499 futex primitive), and a middleware route. The catalogued combinations are instantiated at build time; the resolved profile selects which one runs. The route races two cores: on the 6.6/6.12 tree-waiter kernels the main thread hammers `select` while a consumer thread perturbs the waiter's priority; on the 6.1 compact-waiter kernels it drives `getsockopt(TCP_ZEROCOPY_RECEIVE)` through a punched-hole page; the 5.15 kernels use the multicast waiter. The CPU pair also comes from the resolved profile.
 

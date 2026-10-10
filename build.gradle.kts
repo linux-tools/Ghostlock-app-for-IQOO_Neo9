@@ -104,10 +104,20 @@ tasks.register<Exec>("buildGhostlockNative") {
     outputs.file(file("build/native/ghostlock"))
 }
 
+/* The vivo-neo9 attack payload ships as a verified prebuilt: the reference
+ * libghostlock.so carries the vr guard (tracepoint neutralization) and the
+ * retrying multicast route that the generic src/ tree lacks. Drop the file
+ * out of native-prebuilt/ to rebuild from src/ instead. */
+val ghostlockNativePrebuilt = rootProject.file("native-prebuilt/ghostlock-vivo-neo9.so")
+
 tasks.register<Copy>("prepareGhostlockJniLibs") {
     description = "prepareGhostlockJniLibs"
-    dependsOn("buildGhostlockNative")
-    from("build/native/ghostlock")
+    if (ghostlockNativePrebuilt.isFile) {
+        from(ghostlockNativePrebuilt)
+    } else {
+        dependsOn("buildGhostlockNative")
+        from("build/native/ghostlock")
+    }
     into("app/src/main/jniLibs/arm64-v8a")
     rename { "libghostlock.so" }
     /* Strip only the packaged copy: static libc++ carries its DWARF into the

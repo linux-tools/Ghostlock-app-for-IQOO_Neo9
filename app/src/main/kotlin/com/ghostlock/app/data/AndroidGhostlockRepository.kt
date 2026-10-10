@@ -574,6 +574,13 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
             val binary = File(appContext.applicationInfo.nativeLibraryDir, binaryName)
             require(binary.isFile) { "missing native binary: ${binary.absolutePath}" }
             if (prepareKsud(workDir, onLog) != null) onLog("<k> ksud ready") else onLog("<k> warning: ksud not found")
+            prepareBundledModules(workDir, onLog)
+            /* Manager package + KMI for the root script's late-load command. */
+            KsuManagerCatalog.writeRuntimeConfig(appContext)
+            onLog(
+                "<k> manager=${KsuManagerCatalog.selectedPackage(appContext)} " +
+                    "kmi=${KsuManagerCatalog.kmi(appContext)}",
+            )
             // U01-S14: a per-run KernelSU log path so a previous run's markers
             // can never satisfy the handoff probe; passed to the native process.
             val ksuLog = File(workDir, ksuLogName(System.currentTimeMillis()))
@@ -649,6 +656,19 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
                     environment()["TMPDIR"] = workDir.absolutePath
                     environment()["HOME"] = workDir.absolutePath
                     environment()["GHOSTLOCK_KSU_LOG"] = ksuLog.absolutePath
+                    /* Hand the staged payloads to the native root script: it
+                     * loads vrpatch.ko first, then brings KernelSU up through
+                     * the manager's ksud (`late-load --kmi android13-5.15`).
+                     * KSU_ENFORCE=0 keeps the permissive mode this vivo kernel
+                     * needs (KSU + enforcing breaks the netb filter); "9" is
+                     * the debug sentinel that stops after vrpatch.ko. */
+                    File(workDir, "vrpatch.ko").takeIf { it.isFile }?.let {
+                        environment()["GHOSTLOCK_VRPATCH_KO"] = it.absolutePath
+                    }
+                    /* "9" is the debug sentinel: the patched script stops before
+                     * KSU deployment and keeps the temp root shell alive. */
+                    environment()["GHOSTLOCK_KSU_ENFORCE"] =
+                        if (RootTerminal.debugRootOnly) "9" else "0"
                 }
             onLog("<b> starting native: ${binary.absolutePath}")
             resetRunState()
@@ -1010,8 +1030,63 @@ class AndroidGhostlockRepository(context: Context) : GhostlockRepository {
 
     private fun firstValidProperty(vararg keys: String): String? = keys.asSequence().firstNotNullOfOrNull { validDeviceName(systemProperty(it)) }
 
+    /** Bundled payloads for the vivo Neo9 self-built kernel. Only vrpatch.ko is
+     * shipped: ksud comes from the installed manager package
+     * (me.weishu.kernelsu, lib/arm64/libksud.so) and KernelSU itself is brought
+     * up by that ksud's `late-load --kmi android13-5.15` against the manager
+     * package. The manager APK is staged for the install button only.
+     *
+     * Every payload is re-staged on every run through a temp file, checked for
+     * its magic (ELF / ZIP) and atomically renamed: a truncated copy from an
+     * earlier interrupted run must never be reused -- ksud reports such a file
+     * as "Invalid magic number: 0x0". */
+    private fun stagePayload(
+        workDir: File,
+        assetPath: String,
+        name: String,
+        magic: ByteArray,
+        mode: Int,
+        onLog: (String) -> Unit,
+    ) {
+        val output = File(workDir, name)
+        val temp = File(workDir, "$name.staging")
+        runCatching {
+            temp.delete()
+            appContext.assets.open(assetPath).use { input ->
+                temp.outputStream().use { input.copyTo(it) }
+            }
+            require(temp.length() > 0L) { "empty payload" }
+            val head = ByteArray(magic.size)
+            temp.inputStream().use { stream -> stream.read(head) }
+            require(head.contentEquals(magic)) {
+                "bad magic ${head.joinToString("") { "%02x".format(it) }}"
+            }
+            if (output.exists() && !output.delete()) {
+                error("cannot replace ${output.name}")
+            }
+            require(temp.renameTo(output)) { "rename failed" }
+            runCatching { Os.chmod(output.absolutePath, mode) }
+            onLog("<k> staged ${output.name} (${output.length()} B, magic ok)")
+        }.onFailure {
+            temp.delete()
+            onLog("<k> stage ${output.name} failed: ${it.message}")
+        }
+    }
+
+    private fun prepareBundledModules(workDir: File, onLog: (String) -> Unit) {
+        /* Only vrpatch.ko ships with the app: KernelSU (driver + manager + ksud)
+         * comes from the user's installed manager, selected in the UI. */
+        val elf = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())
+        stagePayload(workDir, "modules/vrpatch.ko", "vrpatch.ko", elf, 420, onLog)
+    }
+
     private fun prepareKsud(workDir: File, onLog: (String) -> Unit): File? {
-        val packages = listOf("me.weishu.kernelsu.pr", "me.weishu.kernelsu", "com.resukisu.resukisu", "com.kowx712.supermanager")
+        /* ksud comes from the installed manager (libksud.so), the same lookup
+         * the root script performs; no ksud is bundled. The selected third
+         * party manager is tried first, then the built-in order. */
+        val output = File(workDir, "ksud")
+        val packages = (listOf(KsuManagerCatalog.selectedPackage(appContext)) +
+            KsuManagerCatalog.managerPackages).distinct()
         var installed = false
         for (packageName in packages) {
             val appInfo = runCatching { appContext.packageManager.getApplicationInfo(packageName, 0) }.getOrNull() ?: continue

@@ -1,7 +1,10 @@
 package com.ghostlock.app.ui
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,12 +34,21 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
@@ -49,11 +61,15 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ghostlock.app.R
+import com.ghostlock.app.data.KsuManagerCatalog
+import com.ghostlock.app.data.RootTerminal
 import com.ghostlock.app.domain.model.CpuPair
 import com.ghostlock.app.domain.model.ExecutionFieldValue
 import com.ghostlock.app.domain.model.ProfileFieldNode
 import com.ghostlock.app.domain.model.ShizukuStatus
 import com.ghostlock.app.domain.model.UserProfileFile
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -378,11 +394,12 @@ private fun MainScreen(
     actions: GhostlockActions,
 ) {
     val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+    var terminalVisible by remember { mutableStateOf(false) }
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
             TopAppBar(
-                title = "GhostLock",
+                title = "GhostLock For IQOO Neo9",
                 scrollBehavior = scrollBehavior,
             )
         },
@@ -392,8 +409,12 @@ private fun MainScreen(
             actions = actions,
             scrollBehavior = scrollBehavior,
             scaffoldPadding = paddingValues,
+            onOpenTerminal = { terminalVisible = true },
             modifier = Modifier.fillMaxSize(),
         )
+    }
+    if (terminalVisible) {
+        TerminalOverlay(onClose = { terminalVisible = false })
     }
 }
 
@@ -618,6 +639,7 @@ private fun MainContent(
     actions: GhostlockActions,
     scrollBehavior: ScrollBehavior,
     scaffoldPadding: PaddingValues,
+    onOpenTerminal: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
@@ -637,6 +659,9 @@ private fun MainContent(
                 actions = actions,
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+        item(key = "debug_terminal") {
+            DebugTerminalCard(onOpen = onOpenTerminal, modifier = Modifier.fillMaxWidth())
         }
         item(key = "run") {
             RunButton(
@@ -704,6 +729,17 @@ private fun ControlPanel(
                 title = stringResource(R.string.safe_mode_label),
                 summary = stringResource(R.string.safe_mode_summary),
             )
+            /* 调试用：只加载 vrpatch.ko 并保留临时 root，不激活 KernelSU */
+            var tempRootOnly by remember { mutableStateOf(RootTerminal.debugRootOnly) }
+            SwitchPreference(
+                checked = tempRootOnly,
+                onCheckedChange = {
+                    tempRootOnly = it
+                    RootTerminal.debugRootOnly = it
+                },
+                title = stringResource(R.string.terminal_skip_ksu),
+                summary = stringResource(R.string.terminal_skip_ksu_summary),
+            )
             /* PROFILE-SUGGEST-01: the profile suggestion seeds the toggle but no
              * longer hides it; an explicit user choice overrides either way. */
             SwitchPreference(
@@ -725,6 +761,7 @@ private fun ControlPanel(
                 ),
             )
         }
+        KsuManagerPickerCard(modifier = modifier.padding(top = 12.dp))
         Card(modifier = modifier.padding(top = 12.dp)) {
             ArrowPreference(
                 title = stringResource(R.string.advanced_settings),
@@ -940,6 +977,428 @@ internal val OverrideHighlight = Color(0xFFF5A623)
 internal val FieldErrorHighlight = Color(0xFFE53935)
 
 internal fun isFieldInputInvalid(text: String): Boolean = text.trim().toLongOrNull() == null
+
+/** 终端状态文案：把 RootTerminal.diagnose 的结果映射到提示。 */
+/** 第三方 KSU 管理器选择：决定 ksud 来源与 late-load 的 --package-name / --kmi。 */
+@Composable
+private fun KsuManagerPickerCard(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var index by remember { mutableIntStateOf(KsuManagerCatalog.selectedIndex(context)) }
+    var custom by remember {
+        mutableStateOf(
+            if (KsuManagerCatalog.needsCustomPackage(context)) {
+                KsuManagerCatalog.selectedPackage(context)
+            } else {
+                ""
+            },
+        )
+    }
+    var kmi by remember { mutableStateOf(KsuManagerCatalog.kmi(context)) }
+    val manager = KsuManagerCatalog.managers[index]
+    val resolved = manager.packageName.ifBlank { custom.trim() }
+    val installed = resolved.isNotBlank() && runCatching {
+        context.packageManager.getApplicationInfo(resolved, 0)
+    }.isSuccess
+    Card(modifier = modifier) {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            OverlaySpinnerPreference(
+                title = stringResource(R.string.ksu_picker_title),
+                items = KsuManagerCatalog.managers.map { DropdownItem(icon = null, title = it.label) },
+                selectedIndex = index,
+                summary = if (resolved.isBlank()) {
+                    stringResource(R.string.ksu_picker_custom_label)
+                } else {
+                    stringResource(
+                        if (installed) R.string.ksu_picker_summary_installed
+                        else R.string.ksu_picker_summary_missing,
+                        resolved,
+                    )
+                },
+                showValue = true,
+                onSelectedIndexChange = { selected ->
+                    index = selected
+                    KsuManagerCatalog.save(context, KsuManagerCatalog.managers[selected], custom)
+                },
+            )
+            if (manager.packageName.isBlank()) {
+                TextField(
+                    value = custom,
+                    onValueChange = {
+                        custom = it
+                        KsuManagerCatalog.save(context, manager, it)
+                    },
+                    label = stringResource(R.string.ksu_picker_custom_hint),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                )
+            }
+            TextField(
+                value = kmi,
+                onValueChange = {
+                    kmi = it
+                    KsuManagerCatalog.saveKmi(context, it)
+                },
+                label = stringResource(R.string.ksu_kmi_label),
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+            )
+            Text(
+                text = stringResource(R.string.ksu_picker_hint),
+                color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun terminalStatusText(status: RootTerminal.Status): String = when (status) {
+    RootTerminal.Status.READY -> stringResource(R.string.terminal_ready)
+    RootTerminal.Status.KSU_ACTIVE -> stringResource(R.string.terminal_state_ksu_active)
+    RootTerminal.Status.STALE -> stringResource(R.string.terminal_state_stale)
+    RootTerminal.Status.NOT_RUN -> stringResource(R.string.terminal_state_not_run)
+}
+
+/** 调试终端入口：用临时 root 执行命令，不依赖 KernelSU。 */
+@Composable
+private fun DebugTerminalCard(
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    var status by remember { mutableStateOf(RootTerminal.diagnose(context)) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            status = RootTerminal.diagnose(context)
+            delay(1500)
+        }
+    }
+    Card(modifier = modifier) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = stringResource(R.string.terminal_title),
+                color = MiuixTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = terminalStatusText(status),
+                color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            TextButton(
+                text = stringResource(R.string.terminal_open),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+                onClick = onOpen,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp),
+            )
+        }
+    }
+}
+
+/** 终端最多保留的行数；超出丢弃最旧行，密集输出（dmesg/logcat）不会拖垮界面。 */
+private const val TERMINAL_MAX_LINES = 3_000
+
+/** IO 线程累积缓冲上限：防止 `while true; do echo x; done` 这类命令吃爆内存。 */
+private const val TERMINAL_BUFFER_LIMIT = 256 * 1024
+
+/** 渲染节拍：输出批量并入列表，最密 100ms 重组一次。 */
+private const val TERMINAL_RENDER_MS = 100L
+
+/** 单条命令的默认超时（可被"停止"提前终止）。 */
+private const val TERMINAL_TIMEOUT_S = 60L
+
+private fun terminalModeText(context: Context, mode: RootTerminal.Mode): String = context.getString(
+    when (mode) {
+        RootTerminal.Mode.SU -> R.string.terminal_mode_su
+        RootTerminal.Mode.TEMP_ROOT -> R.string.terminal_mode_temp_root
+        RootTerminal.Mode.LOCAL -> R.string.terminal_mode_local
+    },
+)
+
+/**
+ * 把累积输出并入行列表：只把**完整行**放进列表，最后半行留在 [partial]（单独渲染，
+ * 避免每个字节都重组整个列表）；行数超上限时从头丢弃。通道探测的噪声行会被过滤。
+ */
+private fun mergeTerminalOutput(
+    lines: MutableList<String>,
+    partial: String,
+    chunk: String,
+): String {
+    val text = (partial + chunk).replace("\r\n", "\n").replace('\r', '\n')
+    var start = 0
+    var index = text.indexOf('\n')
+    while (index >= 0) {
+        val line = text.substring(start, index)
+        if (!line.contains(RootTerminal.PROBE_PREFIX)) lines.add(line)
+        start = index + 1
+        index = text.indexOf('\n', start)
+    }
+    val overflow = lines.size - TERMINAL_MAX_LINES
+    if (overflow > 0) repeat(overflow) { lines.removeAt(0) }
+    return text.substring(start)
+}
+
+/**
+ * 全屏 root 终端。三种后端（管理器 su / 临时 root 文件通道 / 应用权限）由
+ * [RootTerminal.resolveMode] 自动选择：KernelSU 激活后原版 KSU init 会收掉启动脚本，
+ * 文件通道随之失效 —— 此时必须走管理器提供的 `su`，否则就是"只回显、无输出"。
+ */
+@Composable
+private fun TerminalOverlay(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val lines = remember { mutableStateListOf<String>() }
+    val buffer = remember { StringBuilder() }
+    val bufferLock = remember { Any() }
+    val listState = rememberLazyListState()
+    var partial by remember { mutableStateOf("") }
+    var input by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf<RootTerminal.Mode?>(null) }
+    var status by remember { mutableStateOf(RootTerminal.diagnose(context)) }
+
+    fun feed(text: String) {
+        synchronized(bufferLock) {
+            if (buffer.length > TERMINAL_BUFFER_LIMIT) {
+                buffer.delete(0, buffer.length - TERMINAL_BUFFER_LIMIT / 2)
+            }
+            buffer.append(text)
+        }
+    }
+
+    /* 渲染节拍 */
+    LaunchedEffect(Unit) {
+        while (true) {
+            val chunk = synchronized(bufferLock) {
+                val text = buffer.toString()
+                buffer.setLength(0)
+                text
+            }
+            if (chunk.isNotEmpty()) partial = mergeTerminalOutput(lines, partial, chunk)
+            delay(TERMINAL_RENDER_MS)
+        }
+    }
+    /* 后端探测 + 运行状态（KSU 激活会改变可用通道）。
+     * su 一旦可用就固定用它；其余情况周期复查（本地 3s、文件通道 10s，避免频繁探活写命令）。 */
+    LaunchedEffect(Unit) {
+        var nextProbeAt = 0L
+        while (true) {
+            status = RootTerminal.diagnose(context)
+            val now = System.currentTimeMillis()
+            val current = mode
+            if (current == null || (current != RootTerminal.Mode.SU && now >= nextProbeAt)) {
+                val resolved = RootTerminal.resolveMode(context)
+                nextProbeAt = now + if (resolved == RootTerminal.Mode.TEMP_ROOT) 10_000L else 3_000L
+                if (resolved != current) {
+                    mode = resolved
+                    feed(terminalModeText(context, resolved) + "\n")
+                }
+            }
+            delay(1_000)
+        }
+    }
+    /* 文件通道模式：tail .gl_out */
+    LaunchedEffect(mode) {
+        if (mode != RootTerminal.Mode.TEMP_ROOT) return@LaunchedEffect
+        var offset = RootTerminal.outLength(context)
+        while (true) {
+            val (chunk, next) = RootTerminal.readNew(context, offset)
+            if (chunk.isNotEmpty()) {
+                offset = next
+                feed(chunk)
+            }
+            delay(300)
+        }
+    }
+    val atBottom by remember {
+        derivedStateOf {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lines.isEmpty() || last >= lines.lastIndex
+        }
+    }
+    LaunchedEffect(lines.size, partial) {
+        if (atBottom && lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MiuixTheme.colorScheme.surface)
+            .padding(16.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = stringResource(R.string.terminal_title),
+                    color = MiuixTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (busy) {
+                    TextButton(
+                        text = stringResource(R.string.terminal_stop),
+                        onClick = {
+                            RootTerminal.cancelCurrent()
+                            feed("! stopped\n")
+                        },
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                TextButton(
+                    text = stringResource(R.string.terminal_clear),
+                    onClick = {
+                        RootTerminal.clear(context)
+                        lines.clear()
+                        partial = ""
+                    },
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(onClick = onClose) {
+                    Icon(
+                        imageVector = MiuixIcons.Close,
+                        contentDescription = stringResource(R.string.terminal_close),
+                        tint = MiuixTheme.colorScheme.onBackground,
+                    )
+                }
+            }
+            Text(
+                text = terminalStatusText(status),
+                color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+            Text(
+                text = when {
+                    mode == null -> stringResource(R.string.terminal_mode_probing)
+                    mode == RootTerminal.Mode.LOCAL && RootTerminal.ksuLoaded() ->
+                        stringResource(R.string.terminal_ksu_no_root)
+                    else -> terminalModeText(context, mode!!)
+                },
+                color = MiuixTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(top = 10.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF0B1220)),
+            ) {
+                if (lines.isEmpty() && partial.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.terminal_summary),
+                        color = Color(0xFFD1D5DB),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(10.dp),
+                    )
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        items(count = lines.size) { index ->
+                            SelectionContainer {
+                                Text(
+                                    text = lines[index],
+                                    color = Color(0xFFD1D5DB),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                )
+                            }
+                        }
+                        if (partial.isNotEmpty()) {
+                            item(key = "__partial__") {
+                                Text(
+                                    text = partial,
+                                    color = Color(0xFFD1D5DB),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+            ) {
+                TextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    label = stringResource(R.string.terminal_input_hint),
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(
+                    text = stringResource(R.string.terminal_send),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                    enabled = !busy,
+                    onClick = {
+                        val command = input.trim()
+                        input = ""
+                        if (command.isEmpty()) return@TextButton
+                        scope.launch {
+                            busy = true
+                            val current = mode ?: RootTerminal.resolveMode(context).also { mode = it }
+                            when (current) {
+                                RootTerminal.Mode.TEMP_ROOT -> {
+                                    /* 文件通道由 root 侧回显 `$ cmd`，这里不重复回显 */
+                                    if (!RootTerminal.submit(context, command)) {
+                                        feed("! cannot submit command\n")
+                                    }
+                                }
+                                RootTerminal.Mode.SU, RootTerminal.Mode.LOCAL -> {
+                                    feed("$ $command\n")
+                                    val result = RootTerminal.exec(
+                                        command = command,
+                                        mode = current,
+                                        timeoutSeconds = TERMINAL_TIMEOUT_S,
+                                        suBinary = if (current == RootTerminal.Mode.SU) {
+                                            RootTerminal.suBinary()
+                                        } else {
+                                            null
+                                        },
+                                    ) { feed(it) }
+                                    when {
+                                        result.timedOut -> feed(
+                                            context.getString(
+                                                R.string.terminal_timeout,
+                                                TERMINAL_TIMEOUT_S.toInt(),
+                                            ) + "\n",
+                                        )
+                                        result.error != null -> feed("! ${result.error}\n")
+                                        result.exitCode != null -> feed("[exit ${result.exitCode}]\n")
+                                    }
+                                }
+                            }
+                            busy = false
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun RunButton(
